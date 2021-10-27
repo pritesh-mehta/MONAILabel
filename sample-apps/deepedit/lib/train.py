@@ -12,12 +12,7 @@
 import logging
 
 import torch
-from monai.apps.deepgrow.transforms import (
-    AddGuidanceSignald,
-    AddInitialSeedPointd,
-    FindAllValidSlicesd,
-    FindDiscrepancyRegionsd,
-)
+from monai.apps.deepgrow.transforms import AddInitialSeedPointd, FindAllValidSlicesd, FindDiscrepancyRegionsd
 from monai.inferers import SimpleInferer
 from monai.losses import DiceLoss
 from monai.transforms import (
@@ -38,7 +33,11 @@ from monai.transforms import (
 
 from monailabel.deepedit.handlers import TensorBoardImageHandler
 from monailabel.deepedit.interaction import Interaction
-from monailabel.deepedit.transforms import PosNegClickProbAddRandomGuidanced, SingleLabelSingleModalityd
+from monailabel.deepedit.transforms import (
+    DiscardAddGuidanceSingleLabeld,
+    PosNegClickProbAddRandomGuidanced,
+    SingleLabelSingleModalityd,
+)
 from monailabel.tasks.train.basic_train import BasicTrainTask
 
 logger = logging.getLogger(__name__)
@@ -87,7 +86,7 @@ class MyTrain(BasicTrainTask):
             PosNegClickProbAddRandomGuidanced(
                 guidance="guidance", discrepancy="discrepancy", probability="probability"
             ),
-            AddGuidanceSignald(image="image", guidance="guidance"),
+            DiscardAddGuidanceSingleLabeld(keys="image"),
             ToTensord(keys=("image", "label")),
         ]
 
@@ -114,7 +113,7 @@ class MyTrain(BasicTrainTask):
             Resized(keys=("image", "label"), spatial_size=self.spatial_size, mode=("area", "nearest")),
             FindAllValidSlicesd(label="label", sids="sids"),
             AddInitialSeedPointd(label="label", guidance="guidance", sids="sids"),
-            AddGuidanceSignald(image="image", guidance="guidance"),
+            DiscardAddGuidanceSingleLabeld(keys="image"),
             ToTensord(keys=("image", "label")),
         ]
 
@@ -135,7 +134,7 @@ class MyTrain(BasicTrainTask):
             Resized(keys=("image", "label"), spatial_size=self.spatial_size, mode=("area", "nearest")),
             FindAllValidSlicesd(label="label", sids="sids"),
             AddInitialSeedPointd(label="label", guidance="guidance", sids="sids"),
-            AddGuidanceSignald(image="image", guidance="guidance"),
+            DiscardAddGuidanceSingleLabeld(keys="image"),
             ToTensord(keys=("image", "label")),
         ]
 
@@ -160,6 +159,10 @@ class MyTrain(BasicTrainTask):
             train=False,
         )
 
-    def train_handlers(self, output_dir, events_dir, evaluator):
-        handlers = super().train_handlers(output_dir, events_dir, evaluator)
-        return handlers.append(TensorBoardImageHandler(log_dir=events_dir)) if self.debug_mode else handlers
+    def train_handlers(self, output_dir, events_dir, evaluator, local_rank=0):
+        handlers = super().train_handlers(output_dir, events_dir, evaluator, local_rank)
+        return (
+            handlers.append(TensorBoardImageHandler(log_dir=events_dir))
+            if self.debug_mode and local_rank == 0
+            else handlers
+        )

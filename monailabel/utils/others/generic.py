@@ -17,6 +17,8 @@ import pathlib
 import shutil
 import subprocess
 
+import torch.cuda
+
 logger = logging.getLogger(__name__)
 
 
@@ -30,6 +32,15 @@ def remove_file(path: str) -> None:
             shutil.rmtree(path)
         else:
             os.unlink(path)
+
+
+def get_basename(path):
+    """Gets the basename of a file.
+
+    Ref: https://stackoverflow.com/questions/8384737/extract-file-name-from-path-no-matter-what-the-os-path-format
+    """
+    head, tail = os.path.split(path)
+    return tail or os.path.basename(head)
 
 
 def run_command(command, args=None, plogger=None):
@@ -106,3 +117,31 @@ def file_checksum(file, algo="SHA256"):
                 break
             hash.update(chunk)
         return f"{algo}:{hash.hexdigest()}"
+
+
+def gpu_memory_map():
+    """Get the current gpu usage.
+
+    Returns
+    -------
+    usage: dict
+        Keys are device ids as integers.
+        Values are memory usage as integers in MB.
+    """
+    logger.info("Using nvidia-smi command")
+    if shutil.which("nvidia-smi") is None:
+        logger.info("nvidia-smi command didn't work! - Using default image size [128, 128, 64]")
+        return {0: 4300}
+
+    result = subprocess.check_output(
+        ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,nounits,noheader"], encoding="utf-8"
+    )
+
+    # Convert lines into a dictionary
+    gpu_memory = [int(x) for x in result.strip().split("\n")]
+    gpu_memory_map = dict(zip(range(len(gpu_memory)), gpu_memory))
+    return gpu_memory_map
+
+
+def gpu_count():
+    return torch.cuda.device_count()

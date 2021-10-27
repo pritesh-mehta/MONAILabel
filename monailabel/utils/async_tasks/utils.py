@@ -8,51 +8,55 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-import functools
 import json
 import logging
 import os
 import os.path
-import platform
 import subprocess
+import sys
 import uuid
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from threading import Thread
 from typing import Dict
 
 import psutil
-
-from monailabel.config import settings
 
 logger = logging.getLogger(__name__)
 
 background_tasks: Dict = {}
 background_processes: Dict = {}
+background_executors: Dict = {}
 
 
 def _task_func(task, method, callback=None):
-    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
-    script = "run_monailabel_app.bat" if any(platform.win32_ver()) else "run_monailabel_app.sh"
-    if os.path.exists(os.path.realpath(os.path.join(base_dir, "scripts", script))):
-        script = os.path.realpath(os.path.join(base_dir, "scripts", script))
+    request = task["request"]
+    my_env = {**os.environ}
+
+    gpus = request.get("gpus", "all")
+    gpus = gpus if gpus else "all"
+    if gpus != "all":
+        my_env["CUDA_VISIBLE_DEVICES"] = gpus
+    request["gpus"] = "all"
+
+    if method == "train":
+        my_env["MONAI_LABEL_DATASTORE_AUTO_RELOAD"] = "false"
+        my_env["MASTER_ADDR"] = "127.0.0.1"
+        my_env["MASTER_PORT"] = "1234"
 
     cmd = [
-        script,
-        settings.MONAI_LABEL_APP_DIR,
-        settings.MONAI_LABEL_STUDIES,
+        sys.executable,
+        "-m",
+        "monailabel.interfaces.utils.app",
+        "-m",
         method,
-        json.dumps(task["request"]),
+        "-r",
+        json.dumps(request, separators=(",", ":")),
     ]
 
     logger.info(f"COMMAND:: {' '.join(cmd)}")
     process = subprocess.Popen(
-        cmd,
-        stderr=subprocess.STDOUT,
-        stdout=subprocess.PIPE,
-        universal_newlines=True,
-        env=os.environ.copy(),
+        cmd, stderr=subprocess.STDOUT, stdout=subprocess.PIPE, universal_newlines=True, env=my_env
     )
     task_id = task["id"]
     background_processes[method][task_id] = process
@@ -82,7 +86,7 @@ def _task_func(task, method, callback=None):
 
 def run_background_task(request, method, callback=None, debug=False):
     task = {
-        "id": uuid.uuid4(),
+        "id": str(uuid.uuid4()),
         "status": "SUBMITTED",
         "request": request,
         "start_ts": datetime.today().strftime("%Y-%m-%d %H:%M:%S"),
@@ -92,13 +96,15 @@ def run_background_task(request, method, callback=None, debug=False):
         background_tasks[method] = []
     if background_processes.get(method) is None:
         background_processes[method] = dict()
+    if background_executors.get(method) is None:
+        background_executors[method] = ThreadPoolExecutor(max_workers=1)
 
     background_tasks[method].append(task)
     if debug:
         _task_func(task, method)
     else:
-        thread = Thread(target=functools.partial(_task_func, task, method, callback))
-        thread.start()
+        executor = background_executors[method]
+        executor.submit(_task_func, task, method, callback)
     return task
 
 

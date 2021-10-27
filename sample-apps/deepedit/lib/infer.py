@@ -25,7 +25,7 @@ from monai.transforms import (
     ToTensord,
 )
 
-from monailabel.deepedit.transforms import DiscardAddGuidanced, ResizeGuidanceCustomd, SingleLabelSingleModalityd
+from monailabel.deepedit.transforms import DiscardAddGuidanceSingleLabeld, ResizeGuidanceCustomd
 from monailabel.interfaces.tasks.infer import InferTask, InferType
 from monailabel.transform.post import Restored
 
@@ -64,13 +64,13 @@ class Segmentation(InferTask):
     def pre_transforms(self):
         return [
             LoadImaged(keys="image", reader="nibabelreader"),
-            SingleLabelSingleModalityd(keys="image"),
+            # SingleLabelSingleModalityd(keys="image"),
             AddChanneld(keys="image"),
             Spacingd(keys="image", pixdim=self.target_spacing, mode="bilinear"),
             Orientationd(keys="image", axcodes="RAS"),
             NormalizeIntensityd(keys="image"),
             Resized(keys="image", spatial_size=self.spatial_size, mode="area"),
-            DiscardAddGuidanced(keys="image"),
+            DiscardAddGuidanceSingleLabeld(keys="image"),
             ToTensord(keys="image"),
         ]
 
@@ -120,8 +120,8 @@ class Deepgrow(InferTask):
 
     def pre_transforms(self):
         return [
-            LoadImaged(keys="image", reader="nibabelreader"),
-            SingleLabelSingleModalityd(keys="image"),
+            LoadImaged(keys="image"),
+            # SingleLabelSingleModalityd(keys="image"),
             AddChanneld(keys="image"),
             Spacingd(keys="image", pixdim=self.target_spacing, mode="bilinear"),
             Orientationd(keys="image", axcodes="RAS"),
@@ -137,6 +137,9 @@ class Deepgrow(InferTask):
 
     def inferer(self):
         return SimpleInferer()
+
+    def inverse_transforms(self):
+        return []  # Self-determine from the list of pre-transforms provided
 
     def post_transforms(self):
         return [

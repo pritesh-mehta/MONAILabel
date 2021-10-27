@@ -54,41 +54,53 @@ def app_instance(app_dir=None, studies=None, conf=None):
 
 
 def save_result(result, output):
-    print(json.dumps(result))
+    logger.info(f"Result: {json.dumps(result)}")
     if output:
         with open(output, "w") as fp:
             json.dump(result, fp, indent=2)
 
 
 def run_main():
+    logging.basicConfig(
+        level=(logging.INFO),
+        format="[%(asctime)s] [%(process)s] [%(threadName)s] [%(levelname)s] (%(name)s:%(lineno)d) - %(message)s",
+    )
+
     parser = argparse.ArgumentParser()
-    parser.add_argument("-a", "--app", required=True)
-    parser.add_argument("-s", "--studies", required=True)
-    parser.add_argument("-m", "--method", required=True)
+    parser.add_argument("-a", "--app", type=str, default=None)
+    parser.add_argument("-s", "--studies", type=str, default=None)
+    parser.add_argument("-m", "--method", required=True, choices=["infer", "train", "info", "batch_infer", "scoring"])
     parser.add_argument("-r", "--request", type=str, default="{}")
     parser.add_argument("-o", "--output", type=str, default=None)
     parser.add_argument("-d", "--debug", action="store_true")
+    parser.add_argument("--multi_gpu", action="store_true")
+    parser.add_argument("--local_rank", type=int, default=0)
 
     args = parser.parse_args()
     for arg in vars(args):
-        print("USING:: {} = {}".format(arg, getattr(args, arg)))
-    print("")
+        logger.debug("USING:: {} = {}".format(arg, getattr(args, arg)))
+    logger.debug("")
 
-    print("------------------------------------------------------")
-    print("SETTINGS")
-    print("------------------------------------------------------")
-    print(json.dumps(settings.dict(), indent=2))
-    print("")
+    logger.debug("------------------------------------------------------")
+    logger.debug("SETTINGS")
+    logger.debug("------------------------------------------------------")
+    logger.debug(json.dumps(settings.dict(), indent=2))
+    logger.debug("")
 
-    sys.path.append(args.app)
-    sys.path.append(os.path.join(args.app, "lib"))
+    app_dir = args.app if args.app else settings.MONAI_LABEL_APP_DIR
+    studies = args.studies if args.studies else settings.MONAI_LABEL_STUDIES
+    logger.debug(f"++ APP_DIR: {app_dir}")
+    logger.debug(f"++ STUDIES: {studies}")
+
+    sys.path.append(app_dir)
+    sys.path.append(os.path.join(app_dir, "lib"))
 
     logging.basicConfig(
         level=(logging.DEBUG if args.debug else logging.INFO),
         format="[%(asctime)s] [%(threadName)s] [%(levelname)s] (%(name)s:%(lineno)d) - %(message)s",
     )
 
-    a = app_instance(app_dir=args.app, studies=args.studies)
+    a = app_instance(app_dir=app_dir, studies=studies)
     request = json.loads(args.request)
     result = None
 
@@ -96,6 +108,7 @@ def run_main():
         res_img, res_json = a.infer(request=request)
         result = {"label": res_img, "params": res_json}
     elif args.method == "train":
+        request["local_rank"] = args.local_rank
         result = a.train(request)
     elif args.method == "info":
         result = a.info(request)

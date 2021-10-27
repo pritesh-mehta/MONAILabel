@@ -78,13 +78,13 @@ class MyApp(MONAILabelApp):
         self.final_model = os.path.join(self.model_dir, "model.pt")
 
         # Use Heuristic Planner to determine target spacing and spatial size based on dataset+gpu
-        spatial_size = json.loads(conf.get("spatial_size", "[128, 128, 64]"))
+        spatial_size = json.loads(conf.get("spatial_size", "[256, 256, 128]"))
         target_spacing = json.loads(conf.get("target_spacing", "[1.0, 1.0, 1.0]"))
         self.heuristic_planner = strtobool(conf.get("heuristic_planner", "false"))
         self.planner = HeuristicPlanner(spatial_size=spatial_size, target_spacing=target_spacing)
 
         use_pretrained_model = strtobool(conf.get("use_pretrained_model", "true"))
-        pretrained_model_uri = conf.get("pretrained_model_path", f"{self.PRE_TRAINED_PATH}/deepedit_left_atrium.pt")
+        pretrained_model_uri = conf.get("pretrained_model_path", f"{self.PRE_TRAINED_PATH}/deepedit_spleen.pt")
 
         # Path to pretrained weights
         if use_pretrained_model:
@@ -126,7 +126,10 @@ class MyApp(MONAILabelApp):
                 spatial_size=self.planner.spatial_size,
                 target_spacing=self.planner.target_spacing,
             ),
-            "Histogram+GraphCut": HistogramBasedGraphCut(),
+            # intensity range set for MRI
+            "Histogram+GraphCut": HistogramBasedGraphCut(
+                intensity_range=(0, 1500, 0.0, 1.0, True), pix_dim=(2.5, 2.5, 5.0), lamda=1.0, sigma=0.1
+            ),
         }
 
     def init_trainers(self) -> Dict[str, TrainTask]:

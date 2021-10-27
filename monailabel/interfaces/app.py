@@ -17,14 +17,17 @@ import platform
 import shutil
 import tempfile
 import time
+from datetime import timedelta
 from distutils.util import strtobool
 from typing import Callable, Dict, Optional, Sequence
 
 import requests
+import schedule
 from dicomweb_client import DICOMwebClient
 from dicomweb_client.session_utils import create_session_from_user_pass
 from monai.apps import download_and_extract, download_url, load_from_mmar
 from monai.data import partition_dataset
+from timeloop import Timeloop
 
 from monailabel.config import settings
 from monailabel.datastore.dicom import DICOMWebDatastore
@@ -40,9 +43,8 @@ from monailabel.tasks.activelearning.random import Random
 from monailabel.tasks.infer.deepgrow_2d import InferDeepgrow2D
 from monailabel.tasks.infer.deepgrow_3d import InferDeepgrow3D
 from monailabel.tasks.infer.deepgrow_pipeline import InferDeepgrowPipeline
-from monailabel.tasks.scoring.dice import Dice
-from monailabel.tasks.scoring.sum import Sum
 from monailabel.utils.async_tasks.task import AsyncTask
+from monailabel.utils.sessions import Sessions
 
 logger = logging.getLogger(__name__)
 
@@ -89,9 +91,11 @@ class MONAILabelApp:
         self._scoring_methods = self.init_scoring_methods()
         self._batch_infer = self.init_batch_infer()
 
-        self._download_tools()
+        if strtobool(conf.get("download_tools", "true")):
+            self._download_tools()
         self._server_mode = strtobool(conf.get("server_mode", "false"))
         self._auto_update_scoring = strtobool(conf.get("auto_update_scoring", "true"))
+        self._sessions = self._load_sessions(strtobool(conf.get("sessions", "true")))
 
     def init_infers(self) -> Dict[str, InferTask]:
         return {}
@@ -103,7 +107,7 @@ class MONAILabelApp:
         return {"random": Random()}
 
     def init_scoring_methods(self) -> Dict[str, ScoringMethod]:
-        return {"sum": Sum(), "dice": Dice()}
+        return {}
 
     def init_batch_infer(self) -> Callable:
         return BatchInferTask()
@@ -124,7 +128,10 @@ class MONAILabelApp:
                 wado_url_prefix=settings.MONAI_LABEL_WADO_PREFIX,
                 stow_url_prefix=settings.MONAI_LABEL_STOW_PREFIX,
             )
-            return DICOMWebDatastore(dw_client)
+
+            cache_path = settings.MONAI_LABEL_DICOMWEB_CACHE_PATH
+            cache_path = cache_path.strip() if cache_path else ""
+            return DICOMWebDatastore(dw_client, cache_path) if cache_path else DICOMWebDatastore(dw_client)
 
         return LocalDatastore(
             self.studies,
@@ -151,7 +158,7 @@ class MONAILabelApp:
 
         # If labels are not provided, aggregate from all individual infers
         if not self.labels:
-            meta["labels"] = list(itertools.chain.from_iterable([v.get("labels", []) for v in meta["models"].values()]))
+            meta["labels"] = set(itertools.chain.from_iterable([v.get("labels", []) for v in meta["models"].values()]))
 
         return meta
 
@@ -179,17 +186,21 @@ class MONAILabelApp:
         Returns:
             JSON containing `label` and `params`
         """
-        request = copy.deepcopy(request)
-        model_name = request.get("model")
-        model_name = model_name if model_name else "model"
-
-        task = self._infers.get(model_name)
-        if task is None:
+        model = request.get("model")
+        if not model:
             raise MONAILabelException(
-                MONAILabelError.INFERENCE_ERROR,
-                "Inference Task is not Initialized. There is no pre-trained model available",
+                MONAILabelError.INVALID_INPUT,
+                "Model is not provided for Inference Task",
             )
 
+        task = self._infers.get(model)
+        if not task:
+            raise MONAILabelException(
+                MONAILabelError.INVALID_INPUT,
+                f"Inference Task is not Initialized. There is no model '{model}' available",
+            )
+
+        request = copy.deepcopy(request)
         image_id = request["image"]
         datastore = datastore if datastore else self.datastore()
         if os.path.exists(image_id):
@@ -268,23 +279,21 @@ class MONAILabelApp:
             JSON containing result of scoring method
         """
         method = request.get("method")
-        if method and not self._scoring_methods.get(method):
+        if not method:
             raise MONAILabelException(
-                MONAILabelError.APP_INIT_ERROR,
+                MONAILabelError.INVALID_INPUT,
+                "Method is not provided for Scoring Task",
+            )
+
+        task = self._scoring_methods.get(method)
+        if not task:
+            raise MONAILabelException(
+                MONAILabelError.INVALID_INPUT,
                 f"Scoring Task is not Initialized. There is no such scoring method '{method}' available",
             )
 
-        methods = [method] if method else self._scoring_methods.keys()
-        results = []
-        for m in methods:
-            task = self._scoring_methods[m]
-            req = request.get(m, copy.deepcopy(request))
-            logger.info(f"Running scoring: {m}: {task.info()} => {req}")
-
-            result = task(req, datastore if datastore else self.datastore())
-            results.append(result)
-
-        return results[0] if len(results) == 1 else results
+        request = copy.deepcopy(request)
+        return task(copy.deepcopy(request), datastore if datastore else self.datastore())
 
     def datastore(self) -> Datastore:
         return self._datastore
@@ -317,27 +326,26 @@ class MONAILabelApp:
             JSON containing train stats
         """
         model = request.get("model")
-        if model and not self._trainers.get(model):
+        if not model:
             raise MONAILabelException(
-                MONAILabelError.APP_INIT_ERROR,
-                f"Trainer Task is not Initialized. There is no such trainer '{model}' available",
+                MONAILabelError.INVALID_INPUT,
+                "Model is not provided for Training Task",
             )
 
-        models = [model] if model else self._trainers.keys()
-        results = []
-        for m in models:
-            task = self._trainers[m]
-            req = request.get(m, copy.deepcopy(request))
-            logger.info(f"Running training: {m}: {task.info()} => {req}")
+        task = self._trainers.get(model)
+        if not task:
+            raise MONAILabelException(
+                MONAILabelError.INVALID_INPUT,
+                f"Train Task is not Initialized. There is no model '{model}' available",
+            )
 
-            result = task(req, self.datastore())
-            results.append(result)
+        request = copy.deepcopy(request)
+        result = task(request, self.datastore())
 
         # Run all scoring methods
         if self._auto_update_scoring:
             self.async_scoring(None)
-
-        return results[0] if len(results) == 1 else results
+        return result
 
     def next_sample(self, request):
         """
@@ -387,6 +395,20 @@ class MONAILabelApp:
         if self._auto_update_scoring:
             self.async_scoring(None)
 
+        # Run Cleanup Jobs
+        def cleanup_sessions(instance):
+            instance.cleanup_sessions()
+
+        cleanup_sessions(self)
+        time_loop = Timeloop()
+        schedule.every(5).minutes.do(cleanup_sessions, self)
+
+        @time_loop.job(interval=timedelta(seconds=30))
+        def run_scheduler():
+            schedule.run_pending()
+
+        time_loop.start(block=False)
+
     def on_save_label(self, image_id, label_id):
         """
         Callback method when label is saved into datastore by a remote client
@@ -404,25 +426,38 @@ class MONAILabelApp:
         if not method and not self._scoring_methods:
             return {}
 
-        if self._server_mode:
-            request = {"method": method} if method else {}
-            res, _ = AsyncTask.run("scoring", request=request, params=params)
-            return res
+        methods = [method] if method else list(self._scoring_methods.keys())
+        result = {}
+        for m in methods:
+            if self._server_mode:
+                request = {"method": m}
+                request.update(params[m] if params and params.get(m) else {})
+                res, _ = AsyncTask.run("scoring", request=request, params=params, enqueue=True)
+                result[m] = res
+            else:
+                url = f"/scoring/{m}"
+                p = params[m] if params and params.get(m) else None
+                result[m] = self._local_request(url, p, "Scoring")
+        return result[method] if method else result
 
-        url = f"/scoring/{method}" if method else "/scoring/"
-        return self._local_request(url, params, "Scoring")
-
-    def async_training(self, model, params=None):
+    def async_training(self, model, params=None, enqueue=False):
         if not model and not self._trainers:
             return {}
 
-        if self._server_mode:
-            res, _ = AsyncTask.run("train", params=params)
-            return res
-
-        url = "/train"
-        params = {"model": model, model: params} if model else params
-        return self._local_request(url, params, "Training")
+        models = [model] if model else list(self._trainers.keys())
+        enqueue = True if model > 1 else enqueue
+        result = {}
+        for m in models:
+            if self._server_mode:
+                request = {"model": m}
+                request.update(params[m] if params and params.get(m) else {})
+                res, _ = AsyncTask.run("train", request=request, params=params, enqueue=enqueue)
+                result[m] = res
+            else:
+                url = f"/train/{model}?enqueue={enqueue}"
+                p = params[m] if params and params.get(m) else None
+                result[m] = self._local_request(url, p, "Training")
+        return result[model] if model else result
 
     def async_batch_infer(self, model, images: BatchInferImageType, params=None):
         if self._server_mode:
@@ -447,8 +482,10 @@ class MONAILabelApp:
 
         dcmqi_tools = ["segimage2itkimage", "itkimage2segimage", "segimage2itkimage.exe", "itkimage2segimage.exe"]
         existing = [tool for tool in dcmqi_tools if shutil.which(tool) or os.path.exists(os.path.join(target, tool))]
+        logger.debug(f"Existing Tools: {existing}")
 
-        if len(existing) == len(dcmqi_tools) // 2:
+        if len(existing) in [len(dcmqi_tools), len(dcmqi_tools) // 2]:
+            logger.debug("No need to download dcmqi tools")
             return
 
         target_os = "win64.zip" if any(platform.win32_ver()) else "linux.tar.gz"
@@ -460,6 +497,20 @@ class MONAILabelApp:
                 for f in files:
                     if f in dcmqi_tools:
                         shutil.copy(os.path.join(root, f), target)
+
+    def _load_sessions(self, load=False):
+        if not load:
+            return None
+        return Sessions(settings.MONAI_LABEL_SESSION_PATH, settings.MONAI_LABEL_SESSION_EXPIRY)
+
+    def cleanup_sessions(self):
+        if not self._sessions:
+            return
+        count = self._sessions.remove_expired()
+        logger.debug("Total sessions cleaned up: {}".format(count))
+
+    def sessions(self):
+        return self._sessions
 
     @staticmethod
     def download(resources):
