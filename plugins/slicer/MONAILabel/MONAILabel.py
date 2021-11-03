@@ -1373,6 +1373,13 @@ class MONAILabelWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
             logging.info(f"Check if file exists/shared locally: {image_file} => {local_exists}")
             if local_exists:
+                # check if slicer_ref_image folder exists i.e. multimodal task (PM addition)
+                image_dir = os.path.dirname(image_file)
+                slicer_ref_image_dir = os.path.join(image_dir, "slicer_ref_image")
+                if os.path.exists(slicer_ref_image_dir):
+                    filename = os.path.basename(image_file)
+                    image_file = os.path.join(slicer_ref_image_dir, filename)
+                    
                 self._volumeNode = slicer.util.loadVolume(image_file)
                 self._volumeNode.SetName(node_name)
             else:
